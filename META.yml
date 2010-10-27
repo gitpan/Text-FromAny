@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               Text-FromAny
-version:            0.11
+version:            0.20
 abstract:           a module to read pure text from a vareiety of formats
 author:
     - zerodogg <zerodogg@cpan.org>
@@ -13,6 +13,7 @@ build_requires:
 requires:
     Any::Moose:           0
     Archive::Zip:         0
+    CAM::PDF:             0
     File::LibMagic:       0
     HTML::FormatText::WithLinks:  0
     OpenOffice::OODoc:    2.101

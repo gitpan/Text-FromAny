@@ -32,12 +32,15 @@ use File::LibMagic;
 use Archive::Zip;
 use RTF::TEXT::Converter;
 use HTML::FormatText::WithLinks;
-use File::Spec;
+use File::Spec::Functions;
+use CAM::PDF;
+use CAM::PDF::PageText;
+use IPC::Open3 qw(open3);
 
-our $VERSION = '0.11';
+our $VERSION = '0.20';
 
 has 'file' => (
-    is => 'rw',
+    is => 'ro',
     isa => 'Str',
     required => 1,
     );
@@ -46,12 +49,30 @@ has 'allowGuess' => (
     isa => 'Str',
     default => 1,
     );
+has 'allowExternal' => (
+	is => 'rw',
+	isa => 'Str',
+	default => 0,
+	);
 has '_fileType' => (
-    is => 'rw',
+    is => 'ro',
     isa => 'Maybe[Str]',
     builder => '_getType',
     lazy => 1,
     );
+has '_pdfToText' => (
+	is => 'ro',
+	isa => 'Bool',
+	builder => '_checkPdfToText',
+	lazy => 1
+	);
+has '_content' => (
+	is => 'rw',
+	);
+has '_readState' => (
+	is => 'rw',
+	isa => 'Maybe[Str]',
+	);
 
 # Ensure file exists during construction
 sub BUILD
@@ -77,14 +98,17 @@ sub BUILD
 sub text
 {
     my $self = shift;
-    my $ftype = $self->_fileType;
+    my $ftype = $self->detectedType;
+    my $text = $self->_getRead();
     
+	if(defined $text)
+	{
+		return $text;
+	}
     if(not defined $ftype)
     {
         return undef;
     }
-
-    my $text;
 
     try
     {
@@ -127,7 +151,8 @@ sub text
 
         if(defined $text)
         {
-            $text =~ s/\r//g;
+            $text =~ s/(\r|\f)//g;
+			$self->_content($text);
         }
     }
     catch
@@ -135,13 +160,41 @@ sub text
         $text = undef;
     };
 
+	$self->_setRead($text);
+
     return $text;
+}
+
+# Returns the detected filetype.
+# This is defined as a method because it should not be accepted as a
+# construction parameters.
+sub detectedType
+{
+	my $self = shift;
+	return $self->_fileType;
 }
 
 # Retrieve text from a PDF file
 sub _getFromPDF
 {
     my $self = shift;
+	my $text = $self->_getFromPDF_CAMPDF();
+	if ($text =~ /(\w|\d)/)
+	{
+		return $text;
+	}
+	my $pdftotext = $self->_getFromPDF_pdftotext;
+	if ($pdftotext)
+	{
+		return $pdftotext;
+	}
+	return $text;
+}
+
+# Retrieve text from a PDF file using CAM::PDF
+sub _getFromPDF_CAMPDF
+{
+	my $self = shift;
     my $f = CAM::PDF->new($self->file);
     my $text = '';
     foreach(1..$f->numPages())
@@ -150,6 +203,50 @@ sub _getFromPDF
         $text .= CAM::PDF::PageText->render($page);
     }
     return $text;
+}
+
+# Retrieve text from a PDF file using pdftotext (if we are allowed to, and it
+# is available)
+sub _getFromPDF_pdftotext
+{
+	my $self = shift;
+	if(not $self->allowExternal or not $self->_pdfToText)
+	{
+		return;
+	}
+	my $content = '';
+	try
+	{
+		my $pid = open3(my $in, my $out, my $err, 'pdftotext','-layout','-enc','UTF-8',$self->file,'-') or die("Failed to open3() pdftotext: $!\n");
+		while(<$out>)
+		{
+			$content .= $_;
+		}
+		close($in) if $in;
+		close($out) if $out;
+		close($err) if $err;
+		waitpid($pid,0);
+		my $status = $? >> 8;
+		if ($status != 0)
+		{
+			$content = '';
+		}
+	};
+	return $content;
+}
+
+# Check if pdftotext is installed
+sub _checkPdfToText
+{
+	foreach (split /:/, $ENV{PATH})
+	{
+		my $f = catfile($_,'pdftotext');
+		if (-x $f and not -d $f)
+		{
+			return 1;
+		}
+	}
+	return 0;
 }
 
 # Retrieve text from a msword .doc file
@@ -429,6 +526,45 @@ sub _guessType
     return;
 }
 
+# Saves "read" status in the object, so that we know for later reference
+# if we need to re-read the file.
+sub _setRead
+{
+	my $self = shift;
+	my $text = shift;
+	if(defined $text)
+	{
+		$self->_content($text);
+	}
+	$self->_readState($self->_getStateString);
+}
+
+# Retrieves the read file content as long as the read state equals the
+# previous read state, otherwise returns undef
+sub _getRead
+{
+	my $self = shift;
+	
+	if ($self->_readState && $self->_readState eq $self->_getStateString)
+	{
+		return $self->_content;
+	}
+	return;
+}
+
+# Retrieves the 'state string'. This is a string representation of
+# the internal state in the object that might have some effect on how
+# text gets read.
+#
+# Ie. if allowExternal or allowGuess has changed since we last read
+# a file, we read it again.
+sub _getStateString
+{
+	my $self = shift;
+	my $readState = join('-',$self->allowExternal,$self->allowGuess);
+	return $readState;
+}
+
 __PACKAGE__->meta->make_immutable;
 1;
 
@@ -466,9 +602,10 @@ construction.
 
 =item B<file>
 
-The file to read. B<MUST> be supplied during runtime. Can be any of the
-supported formats. If it is not of any supported format, or an unknown format,
-the object will still work, though ->text will return undef.
+The file to read. B<MUST> be supplied during construction time (and can not be
+changed later). Can be any of the supported formats. If it is not of any
+supported format, or an unknown format, the object will still work, though
+->text will return undef.
 
 =item B<allowGuess>
 
@@ -477,6 +614,18 @@ detect the filetype it will fall back to guessing the filetype based upon
 the file extension. Set this to false to disable this.
 
 The default for I<allowGuess> is subject to change in later versions, so if
+you depend on it being either on or off, you are best off explicitly requesting
+that behaviour, rather than relying on the defaults.
+
+=item B<allowExternal>
+
+This is a boolean, defaulting to false. If the perl-based PDF reading method
+fails (L<PDF::CAM>), then Text::FromAny will fall back to calling the system
+L<pdftotext(1)> to get the text. L<PDF::CAM> reads most PDFs, but has troubles
+with a select few, and those can be handled by L<pdftotext(1)> from the
+Poppler library.
+
+The default for I<allowExternal> is subject to change in later versions, so if
 you depend on it being either on or off, you are best off explicitly requesting
 that behaviour, rather than relying on the defaults.
 
@@ -490,6 +639,25 @@ that behaviour, rather than relying on the defaults.
 
 Returns the text contained in the file, or undef if the file format is unknown
 or unsupported.
+
+Normally Text::FromAny will only read the file once, and then cache the text.
+However if you change the value of either the allowGuess or allowExternal
+attributes, Text::FromAny will re-read the file, as those can affect how a file
+is read.
+
+=item B<detectedType>
+
+Returns the detected filetype (or undef if unknown or unsupported).
+The filetype is returned as a string, and can be any of the following:
+
+	pdf  => PDF
+	odt  => OpenDocument text
+	sxw  => Legacy OpenOffice.org Writer
+	doc  => msword
+	docx => "Open XML"
+	rtf  => RTF
+	txt  => Cleartext
+	html => HTML (or XHTML)
 
 =back
 
