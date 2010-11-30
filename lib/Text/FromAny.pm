@@ -37,7 +37,7 @@ use CAM::PDF;
 use CAM::PDF::PageText;
 use IPC::Open3 qw(open3);
 
-our $VERSION = '0.20';
+our $VERSION = '0.21';
 
 has 'file' => (
     is => 'ro',
@@ -309,7 +309,7 @@ sub _getFromRTF
     my $text = '';
 
     # RTF::TEXT::Converter spews some errors to STDERR that we don't need,
-    # so we 
+    # so we silence it
     local *STDERR;
     open(STDERR,'>','/dev/null');
     try

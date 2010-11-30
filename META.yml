@@ -1,6 +1,6 @@
 --- #YAML:1.0
 name:               Text-FromAny
-version:            0.20
+version:            0.21
 abstract:           a module to read pure text from a vareiety of formats
 author:
     - zerodogg <zerodogg@cpan.org>
